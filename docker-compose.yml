@@ -14,17 +14,5 @@ services:
       - odl_data:/opt/opendaylight/data
     restart: unless-stopped
 
-  agent:
-    build: ./agent
-    container_name: sdn-agent
-    # 注意：agent 不再使用 host 网络，但它可以通过 odl 容器名访问（因为都在同一个 compose 网络中）
-    depends_on:
-      - odl
-    environment:
-      - ODL_REST_URL=http://odl:8181   # 容器内通过服务名访问
-    volumes:
-      - ./agent:/app
-    command: python /app/main.py
-
 volumes:
   odl_data:
