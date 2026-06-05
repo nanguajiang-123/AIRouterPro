@@ -3,13 +3,14 @@ version: '3.8'
 services:
   odl:
     image: opendaylight/odl:latest
+    command: /opt/opendaylight/bin/karaf
     container_name: odl-controller
     ports:
       - "8181:8181"   # REST API
       - "6633:6633"   # OpenFlow
     environment:
-      - JAVA_MIN_MEM=512M
-      - JAVA_MAX_MEM=2G
+      - JAVA_MIN_MEM=256M
+      - JAVA_MAX_MEM=1024M
     volumes:
       - odl_data:/opt/opendaylight/data
     restart: unless-stopped
