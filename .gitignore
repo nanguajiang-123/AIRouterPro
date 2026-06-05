@@ -1,6 +1,43 @@
 # Python
 __pycache__/
 *.py[cod]
+<<<<<<< HEAD
+*.pyo
+*.pyd
+*.pyi
+*.so
+
+# Virtual environments
+venv/
+.env
+.env.*
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Test/coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+
+# Type checkers/linters
+.mypy_cache/
+.pyre/
+.pytype/
+.ruff_cache/
+
+# Logs
+*.log
+
+# IDEs/editors
+.vscode/
+.idea/
+=======
 *$py.class
 *.so
 *.egg-info/
@@ -41,10 +78,14 @@ dist/
 .idea/
 *.swp
 *.swo
+>>>>>>> origin/main
 
 # OS
 .DS_Store
 Thumbs.db
+<<<<<<< HEAD
+=======
 
 # Logs
 *.log
+>>>>>>> origin/main
