@@ -62,29 +62,58 @@ def fetch_topology() -> dict:
 
 
 def to_graph(nodes_data: dict, topo_data: dict) -> nx.Graph:
-    """将 ODL inventory + topology 转为 networkx 无向图。"""
-    g = nx.Graph()
+    """将 ODL inventory + topology 转为 networkx 无向图。
 
-    # 节点：从 inventory 中取交换机
+    从 port name（s1-ethX）推断主机 hX 并连接到对应交换机。
+    即使 ODL 尚未上报端口，也会根据命名规则添加主机和链路。
+    """
+    g = nx.Graph()
+    host_to_switch_node: dict[str, str] = {}  # h3 → openflow:1
+
     switches = nodes_data.get("nodes", {}).get("node", [])
     for sw in switches:
         nid = sw["id"]
         g.add_node(nid, type="switch")
-        # 端口作为边端点
         for conn in sw.get("node-connector", []):
             pid = conn["id"]
-            g.add_node(pid, type="port")
+            pname = conn.get("flow-node-inventory:name", "") or ""
+            pnum = conn.get("flow-node-inventory:port-number")
+            g.add_node(pid, type="port", port_num=pnum, port_name=pname)
             g.add_edge(nid, pid, weight=1)
+            # s1-ethX → hX 映射
+            parts = pname.rsplit("-eth", 1)
+            if len(parts) == 2 and parts[1].isdigit():
+                host = f"h{parts[1]}"
+                host_to_switch_node[host] = nid
+                g.add_node(host, type="host")
+                g.add_edge(pid, host, weight=1)
+                # 也直接连接 host 到 switch（简化寻路）
+                g.add_edge(nid, host, weight=1)
 
-    # 链路：从 topology 中取连接
     topologies = topo_data.get("network-topology", {}).get("topology", [])
     for topo in topologies:
         for node in topo.get("node", []):
-            node_id = node.get("node-id", "")
-            tps = node.get("termination-point", [])
-            for tp in tps:
-                tp_id = tp.get("tp-id", "")
-                g.add_edge(node_id, tp_id, weight=1)
+            nid = node.get("node-id", "")
+            for tp in node.get("termination-point", []):
+                tpid = tp.get("tp-id", "")
+                if g.has_node(nid) and g.has_node(tpid):
+                    g.add_edge(nid, tpid, weight=1)
+        for link in topo.get("link", []):
+            src = link.get("source", {})
+            dst = link.get("destination", {})
+            sn = src.get("source-node", "")
+            dn = dst.get("dest-node", "")
+            if sn and dn:
+                g.add_edge(sn, dn, weight=1)
+
+    # 如果图中存在交换机节点但没有主机，根据 Mininet 命名约定添加
+    sw_names = sorted([n for n in g.nodes() if isinstance(n, str) and n.startswith("openflow:")])
+    if sw_names and not any(n for n in g.nodes() if isinstance(n, str) and n.startswith("h")):
+        for host_num in range(1, 6):  # 预添加 h1 ~ h5
+            host = f"h{host_num}"
+            g.add_node(host, type="host")
+            for sw in sw_names:
+                g.add_edge(sw, host, weight=1)
 
     return g
 
@@ -159,7 +188,8 @@ class RoutingModel:
             heads = hp.get("heads", 1)
 
             encoder = make_encoder(hidden_dim, layer_num, kind=kind, heads=heads)
-            pooler = PathPooler(hidden_dim=hidden_dim)
+            # heads=1 与训练时的 PathPooler 对齐（见 network-rl/api introduction.md）
+            pooler = PathPooler(hidden_dim=hidden_dim, heads=1)
             scorer = KPathScorer(hidden_dim=hidden_dim)
 
             sd = data["actor_state_dict"]
@@ -203,37 +233,59 @@ class RoutingModel:
 
         log.info("RL select path: {} → {} (k={})", src, dst, k)
 
-        # 1. 构建有向边索引 [2, E]
+        # 0. 节点 → 整数索引映射
+        node_list = sorted(graph.nodes())
+        node_to_idx = {n: i for i, n in enumerate(node_list)}
+        N = len(node_list)
+        if N == 0:
+            return self._fallback_shortest(graph, src, dst)
+
+        src_idx = node_to_idx.get(src)
+        dst_idx = node_to_idx.get(dst)
+        if src_idx is None or dst_idx is None:
+            log.warning("src/dst {} not in graph, fallback to shortest-path", src, dst)
+            return self._fallback_shortest(graph, src, dst)
+
+        # 1. 有向边索引 [2, E] — 用整数索引
         edge_list = list(graph.edges())
         if not edge_list:
             return self._fallback_shortest(graph, src, dst)
         E = len(edge_list)
-        # 每条无向边拆两条有向边
-        index_list = []
+        index_pairs = []
         for u, v in edge_list:
-            index_list.append((u, v))
-            index_list.append((v, u))
-        index = torch.tensor(index_list, dtype=torch.long).t().contiguous()  # [2, 2E]
+            ui = node_to_idx.get(u)
+            vi = node_to_idx.get(v)
+            if ui is not None and vi is not None:
+                index_pairs.append((ui, vi))
+                index_pairs.append((vi, ui))
+        if not index_pairs:
+            return self._fallback_shortest(graph, src, dst)
+        index = torch.tensor(index_pairs, dtype=torch.long).t().contiguous()  # [2, 2E]
 
         # 2. 边特征 [2E, 3]
-        features = torch.zeros(2 * E, 3)
+        E2 = len(index_pairs)  # 实际有向边数
+        features = torch.zeros(E2, 3)
         for i, (u, v) in enumerate(edge_list):
             d = float(graph[u][v].get("delay", 10))
             bw = float(graph[u][v].get("bandwidth", 100))
+            # 找到对应的两条有向边的位置
+            ui = node_to_idx.get(u)
+            vi = node_to_idx.get(v)
+            if ui is None or vi is None:
+                continue
+            # 正反两条边填充相同特征
             for offset in (i, i + E):
-                features[offset, 0] = (d - DELAY_MU) / DELAY_SIG
-                features[offset, 1] = 0.0  # util（初始 0）
-                features[offset, 2] = (bw - BW_MU) / BW_SIG
+                if offset < E2:
+                    features[offset, 0] = (d - DELAY_MU) / DELAY_SIG
+                    features[offset, 1] = 0.0
+                    features[offset, 2] = (bw - BW_MU) / BW_SIG
 
-        # 3. 节点 & 节点特征
-        node_list = sorted(graph.nodes())
-        node_to_idx = {n: i for i, n in enumerate(node_list)}
-        N = len(node_list)
+        # 3. 节点特征 [N, 2]
         x = torch.zeros(N, 2)
-        x[node_to_idx.get(src, 0), 0] = 1.0
-        x[node_to_idx.get(dst, min(1, N - 1)), 1] = 1.0
+        x[src_idx, 0] = 1.0
+        x[dst_idx, 1] = 1.0
 
-        # 4. 流度量 [2]（phi 后续会从 intent_constraints 传入）
+        # 4. 流度量 [2]
         metrics = torch.tensor([0.5, (25.0 - BW_MU) / BW_SIG])
 
         # 5. K 候选路径
@@ -249,9 +301,10 @@ class RoutingModel:
         paths = torch.full((K, L), -1, dtype=torch.long)
         mask = torch.zeros(K, L, dtype=torch.bool)
         for ki, p in enumerate(path_list):
-            idxs = [node_to_idx[n] for n in p]
-            paths[ki, :len(idxs)] = torch.tensor(idxs)
-            mask[ki, :len(idxs)] = True
+            idxs = [node_to_idx[n] for n in p if n in node_to_idx]
+            if idxs:
+                paths[ki, :len(idxs)] = torch.tensor(idxs, dtype=torch.long)
+                mask[ki, :len(idxs)] = True
 
         # 6. 推理
         action, logits = self._policy.forward(x, index, features, metrics, paths, mask)
@@ -294,14 +347,112 @@ def get_routing_model() -> RoutingModel:
 #  ODL 流表下发
 # ──────────────────────────────────────────────────────────────────────
 
+def _host_to_ip(host: str) -> str:
+    """hX → 10.0.0.X"""
+    num = "".join(c for c in host if c.isdigit())
+    return f"10.0.0.{num}" if num else "10.0.0.1"
+
+
+def _get_port_mapping() -> dict[str, int]:
+    """从 ODL inventory 获取 {主机名 → 端口号} 映射。
+
+    若 ODL 未上报端口，回退到 Mininet 默认约定：
+      h1 → port 1, h2 → port 2, ...
+    """
+    inv = fetch_inventory()
+    mapping: dict[str, int] = {}
+    switches = inv.get("nodes", {}).get("node", [])
+    for sw in switches:
+        for conn in sw.get("node-connector", []):
+            pname = conn.get("flow-node-inventory:name", "") or ""
+            pnum = conn.get("flow-node-inventory:port-number")
+            if pname and pnum is not None and pname.startswith("s"):
+                # s1-eth3 → "h3" → port=3
+                parts = pname.rsplit("-eth", 1)
+                if len(parts) == 2 and parts[1].isdigit():
+                    mapping[f"h{parts[1]}"] = int(pnum)
+
+    # 回退：如果 ODL 没上报，用 Mininet 默认编号
+    if not mapping:
+        for host_num in range(1, 10):
+            mapping[f"h{host_num}"] = host_num
+        log.info("Port mapping: ODL empty, using Mininet defaults")
+
+    log.debug("Port mapping: {}", mapping)
+    return mapping
+
 
 def install_flows(path: list[str]) -> bool:
-    """在 ODL 上沿路径安装流表项。（待实际实现）"""
+    """沿路径在 ODL 上安装流表。
+
+    路径格式: ["h1", "openflow:1", "h3"]（交换机名用 openflow:ID 格式）
+    对路径中每个交换机，安装一条匹配目标 IP → 输出到对应端口的流表项。
+    """
     if not path or len(path) < 2:
         log.warning("Cannot install flows: invalid path")
         return False
 
-    log.info("Installing flows along: {} → ... → {}", path[0], path[-1])
-    # TODO: 构造 FlowNodeInventory 并 PUT 到 ODL
-    # 当前为占位实现
-    return True
+    log.info("Installing flows: {} → ... → {}", path[0], path[-1])
+
+    # 取路径中的交换机和目标主机
+    switches = [n for n in path if n.startswith("openflow:")]
+    dst_host = path[-1]  # 最后一个是目标主机
+    dst_ip = _host_to_ip(dst_host)
+
+    # 获取端口映射
+    port_map = _get_port_mapping()
+
+    success = True
+    flow_id = 1
+
+    for sw in switches:
+        # 确定输出端口：目标主机对应的端口号
+        out_port = port_map.get(dst_host)
+        if out_port is None:
+            log.warning("No port mapping for {} (dst={})", sw, dst_host)
+            success = False
+            continue
+
+        flow_body = {
+            "flow-node-inventory:flow": {
+                "id": str(flow_id),
+                "priority": 10,
+                "match": {
+                    "ethernet-match": {
+                        "ethernet-type": {"type": 2048},
+                    },
+                    "ipv4-destination": f"{dst_ip}/32",
+                },
+                "instructions": {
+                    "instruction": [
+                        {
+                            "order": 0,
+                            "apply-actions": {
+                                "action": [
+                                    {
+                                        "order": 0,
+                                        "output-action": {
+                                            "output-node-connector": str(out_port),
+                                        },
+                                    },
+                                ],
+                            },
+                        },
+                    ],
+                },
+            },
+        }
+
+        path_url = (
+            f"/restconf/config/opendaylight-inventory:nodes/"
+            f"node/{sw}/table/0/flow/{flow_id}"
+        )
+        ok = _odl_put(path_url, flow_body)
+        if ok:
+            log.info("  Flow {} installed on {} → port {} (dst={})", flow_id, sw, out_port, dst_ip)
+        else:
+            log.warning("  Failed to install flow {} on {}", flow_id, sw)
+            success = False
+        flow_id += 1
+
+    return success
