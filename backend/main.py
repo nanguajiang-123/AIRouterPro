@@ -8,6 +8,8 @@ import uvicorn
 
 from config import settings
 from app.logger import log
+from app.routers.topology import router as topology_router
+from app.routers.plan import router as plan_router
 
 
 @asynccontextmanager
@@ -25,6 +27,8 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None]:
 
 
 app = FastAPI(title="SDN Control Platform", version="0.1.0", lifespan=lifespan)
+app.include_router(topology_router)
+app.include_router(plan_router)
 
 
 @app.get("/health")

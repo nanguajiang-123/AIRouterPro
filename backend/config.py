@@ -51,7 +51,19 @@ class Settings:
     odl_south_user: str
     odl_south_pass: str
 
+    # ── DeepSearch LLM (intent classification) ──────────────────────────
+    deepsearch_api_key: str
+    deepsearch_url: str
+
+    # ── XCHiRL routing model ────────────────────────────────────────────
+    xchirl_model_path: str
+
     # ── derived ──────────────────────────────────────────────────────────
+    @property
+    def xchirl_model_abs_path(self) -> str:
+        """返回绝对路径（支持相对 .env 的相对路径）。"""
+        p = Path(self.xchirl_model_path)
+        return str(p if p.is_absolute() else PROJECT_ROOT / p)
     @property
     def odl_north_base_url(self) -> str:
         return f"http://{self.odl_north_ip}:{self.odl_north_port}"
@@ -75,6 +87,11 @@ def get_settings() -> Settings:
         odl_south_port=_get_int("ODL_SOUTH_PORT", 6633),
         odl_south_user=_get_str("ODL_SOUTH_USER", "admin"),
         odl_south_pass=_get_str("ODL_SOUTH_PASS", "admin"),
+        # DeepSearch
+        deepsearch_api_key=_get_str("DEEPSEARCH_API_KEY", ""),
+        deepsearch_url=_get_str("DEEPSEARCH_API_URL", ""),
+        # XCHiRL
+        xchirl_model_path=_get_str("XCHIRL_MODEL_PATH", ""),
     )
 
 
