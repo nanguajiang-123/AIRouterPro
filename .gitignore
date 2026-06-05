@@ -1,6 +1,7 @@
 # Python
 __pycache__/
 *.py[cod]
+<<<<<<< HEAD
 *.pyo
 *.pyd
 *.pyi
@@ -36,7 +37,55 @@ htmlcov/
 # IDEs/editors
 .vscode/
 .idea/
+=======
+*$py.class
+*.so
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+env/
+ENV/
+.env
+.env.*
+.python-version
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+.ipynb_checkpoints/
+
+# Node / Frontend
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.pnpm-store/
+.vite/
+.cache/
+.parcel-cache/
+.eslintcache
+coverage/
+dist/
+
+# IDE / Editor
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.swp
+*.swo
+>>>>>>> origin/main
 
 # OS
 .DS_Store
 Thumbs.db
+<<<<<<< HEAD
+=======
+
+# Logs
+*.log
+>>>>>>> origin/main
