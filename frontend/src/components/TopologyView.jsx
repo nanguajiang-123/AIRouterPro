@@ -4,18 +4,20 @@ import { fetchTopology } from '../api/client';
 
 const SWITCH_STYLE = {
   shape: 'round-rectangle',
-  width: 60,
-  height: 40,
+  width: 70,
+  height: 24,
   backgroundColor: '#000',
   borderColor: '#000',
   borderWidth: 2,
   color: '#fff',
   label: 'data(label)',
-  fontSize: 12,
+  fontSize: 8,
   textValign: 'center',
   textHalign: 'center',
   fontFamily: 'monospace',
   fontWeight: 'bold',
+  textWrap: 'ellipsis',
+  textMaxWidth: 66,
 };
 
 const HOST_STYLE = {
@@ -47,9 +49,17 @@ const HIGHLIGHTED_LINK = {
   lineStyle: 'dashed',
 };
 
+function isSame(a, b) {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
 export default function TopologyView({ highlightedPath }) {
   const containerRef = useRef(null);
   const cyRef = useRef(null);
+  const laidOutRef = useRef(false);
+  const prevDataRef = useRef(null);
   const [error, setError] = useState(null);
 
   // ── 初始化 Cytoscape ──
@@ -59,22 +69,10 @@ export default function TopologyView({ highlightedPath }) {
     cyRef.current = cytoscape({
       container: containerRef.current,
       style: [
-        {
-          selector: 'node[type="switch"]',
-          style: SWITCH_STYLE,
-        },
-        {
-          selector: 'node[type="host"]',
-          style: HOST_STYLE,
-        },
-        {
-          selector: 'edge',
-          style: LINK_STYLE,
-        },
-        {
-          selector: 'edge.highlighted',
-          style: HIGHLIGHTED_LINK,
-        },
+        { selector: 'node[type="switch"]', style: SWITCH_STYLE },
+        { selector: 'node[type="host"]', style: HOST_STYLE },
+        { selector: 'edge', style: LINK_STYLE },
+        { selector: 'edge.highlighted', style: HIGHLIGHTED_LINK },
       ],
       layout: { name: 'grid', rows: 1 },
       wheelSensitivity: 0.3,
@@ -88,7 +86,7 @@ export default function TopologyView({ highlightedPath }) {
     };
   }, []);
 
-  // ── 轮询拓扑 ──
+  // ── 轮询拓扑，有变化才刷新 ──
   useEffect(() => {
     let timer;
 
@@ -96,7 +94,10 @@ export default function TopologyView({ highlightedPath }) {
       try {
         const data = await fetchTopology();
         setError(null);
-        updateGraph(data);
+        if (!isSame(data, prevDataRef.current)) {
+          prevDataRef.current = data;
+          updateGraph(data);
+        }
       } catch (err) {
         setError(err.message || 'Failed to fetch topology');
       }
@@ -136,32 +137,20 @@ export default function TopologyView({ highlightedPath }) {
 
     const cyEdges = links.map((l, i) => ({
       group: 'edges',
-      data: {
-        id: `e${i}`,
-        source: l.source,
-        target: l.target,
-        label: l.bandwidth ? `${l.bandwidth}M` : '',
-      },
+      data: { id: `e${i}`, source: l.source, target: l.target },
     }));
 
     cy.json({ elements: [...cyNodes, ...cyEdges] });
 
-    // 自动布局：交换机居中，主机环绕
-    const switchNodes = cy.nodes('[type="switch"]');
-    const hostNodes = cy.nodes('[type="host"]');
-
-    if (switchNodes.length === 1) {
-      const s = switchNodes.first();
-      s.position({ x: 300, y: 200 });
-      const angleStep = (2 * Math.PI) / Math.max(hostNodes.length, 1);
-      hostNodes.forEach((h, i) => {
-        h.position({
-          x: 300 + 160 * Math.cos(angleStep * i - Math.PI / 2),
-          y: 200 + 160 * Math.sin(angleStep * i - Math.PI / 2),
-        });
-      });
-    } else {
-      cy.layout({ name: 'cose', animate: false, nodeRepulsion: 8000 }).run();
+    // 只在首次加载时跑布局，之后不再重新排布
+    if (!laidOutRef.current) {
+      const ns = cy.nodes('[type="switch"]');
+      if (ns.length <= 1) {
+        ns.first().position({ x: 300, y: 200 });
+      } else {
+        cy.layout({ name: 'cose', animate: false, nodeRepulsion: 8000 }).run();
+      }
+      laidOutRef.current = true;
     }
 
     cy.fit(undefined, 40);

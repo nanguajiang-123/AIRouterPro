@@ -118,37 +118,67 @@ def to_graph(nodes_data: dict, topo_data: dict) -> nx.Graph:
     return g
 
 
+def _fetch_mininet_topo() -> dict:
+    """从 WSL 读取 Mininet 导出的 /tmp/topology.json。"""
+    import subprocess as _sp, json as _json
+
+    try:
+        result = _sp.run(
+            ["wsl", "--", "cat", "/tmp/topology.json"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode != 0:
+            return {}
+        return _json.loads(result.stdout)
+    except Exception:
+        return {}
+
+
 def to_frontend_topology(nodes_data: dict, topo_data: dict) -> dict:
-    """聚合 inventory + topology 为前端所需的 {nodes, links} 格式。"""
+    """从 Mininet 导出的拓扑文件构建前端所需的 {nodes, links} 格式。"""
     nodes: list[dict] = []
     links: list[dict] = []
-    seen_nodes: set = set()
+    seen: set = set()
+    seen_links: set = set()
+    tn = _fetch_mininet_topo()
 
-    # 交换机节点
-    switches = nodes_data.get("nodes", {}).get("node", [])
-    for sw in switches:
+    # ── 交换机节点（优先 Mininet 文件，再用 ODL 补充） ──
+    for s in tn.get("switches", []):
+        if s not in seen:
+            nodes.append({"id": s, "name": s, "type": "switch"})
+            seen.add(s)
+    odl_sws = nodes_data.get("nodes", {}).get("node", [])
+    for sw in odl_sws:
         nid = sw["id"]
-        nodes.append({"id": nid, "name": nid, "type": "switch"})
-        seen_nodes.add(nid)
+        if nid not in seen:
+            nodes.append({"id": nid, "name": nid, "type": "switch"})
+            seen.add(nid)
 
-    # 拓扑中的节点（可能包含主机信息）
-    topologies = topo_data.get("network-topology", {}).get("topology", [])
-    for topo in topologies:
-        for node in topo.get("node", []):
-            node_id = node.get("node-id", "")
-            if node_id not in seen_nodes:
-                label = node_id.split(":")[-1] if ":" in node_id else node_id
-                nodes.append({"id": node_id, "name": label, "type": "host"})
-                seen_nodes.add(node_id)
+    # ── 主机 ──
+    for h in tn.get("hosts", []):
+        if h not in seen:
+            nodes.append({"id": h, "name": h, "type": "host"})
+            seen.add(h)
 
-    # 拓扑中的边
-    for topo in topologies:
-        for node in topo.get("node", []):
-            nid = node.get("node-id", "")
-            for tp in node.get("termination-point", []):
-                tpid = tp.get("tp-id", "")
-                # 尝试从主机 → 交换机方向建立连接
-                links.append({"source": nid, "target": tpid})
+    # ── 链路 ──
+    for src, dst in tn.get("links", []):
+        if src == dst or src.startswith("c") or dst.startswith("c"):
+            continue
+        key = (src, dst) if src < dst else (dst, src)
+        if key not in seen_links:
+            seen_links.add(key)
+            links.append({"source": key[0], "target": key[1]})
+
+    # ── ODL network-topology 补充 ──
+    for topo in topo_data.get("network-topology", {}).get("topology", []):
+        for link in topo.get("link", []):
+            sn = link.get("source", {}).get("source-node", "")
+            dn = link.get("destination", {}).get("dest-node", "")
+            if sn and dn:
+                key = (sn, dn) if sn < dn else (dn, sn)
+                if key not in seen_links:
+                    seen_links.add(key)
+                    links.append({"source": key[0], "target": key[1]})
 
     return {"nodes": nodes, "links": links}
 
